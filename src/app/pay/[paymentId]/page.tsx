@@ -22,6 +22,13 @@ const POLL_INTERVAL_MS = 5000;
 const POLL_MAX_ATTEMPTS = 24;
 const POLL_MAX_BACKOFF_MS = 60_000;
 
+const WS_URL =
+  process.env.NEXT_PUBLIC_WS_URL ??
+  (typeof window !== 'undefined'
+    ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
+    : '');
+const WS_RECONNECT_MAX_MS = 30_000;
+
 function computeExpiresAt(payment: any): Date | null {
   if (payment?.expiresAt) return new Date(payment.expiresAt);
   if (payment?.expiryMinutes && payment?.createdAt) {
@@ -45,6 +52,7 @@ export default function PayPage({ params }: { params: { paymentId: string } }) {
   const [now, setNow] = useState(Date.now());
   const [copied, setCopied] = useState<string | null>(null);
   const [pollWarning, setPollWarning] = useState<string>('');
+  const [liveConnected, setLiveConnected] = useState(false);
   const pollNowRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -52,6 +60,10 @@ export default function PayPage({ params }: { params: { paymentId: string } }) {
     let consecutiveFailures = 0;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
+    let ws: WebSocket | null = null;
+    let wsReconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let wsReconnectAttempts = 0;
+    let wsActive = false;
 
     paymentsApi.getByReference(params.paymentId)
       .then(({ data }) => setPayment(data))
@@ -59,7 +71,7 @@ export default function PayPage({ params }: { params: { paymentId: string } }) {
       .finally(() => setLoading(false));
 
     const scheduleNext = () => {
-      if (cancelled) return;
+      if (cancelled || wsActive) return;
       const backoff = Math.min(
         POLL_INTERVAL_MS * 2 ** consecutiveFailures,
         POLL_MAX_BACKOFF_MS,
@@ -68,7 +80,7 @@ export default function PayPage({ params }: { params: { paymentId: string } }) {
     };
 
     const poll = () => {
-      if (cancelled) return;
+      if (cancelled || wsActive) return;
       pollAttempts += 1;
       if (pollAttempts >= POLL_MAX_ATTEMPTS) {
         setPollWarning('Status checks are taking longer than expected.');
@@ -100,12 +112,81 @@ export default function PayPage({ params }: { params: { paymentId: string } }) {
       poll();
     };
 
+    const stopPolling = () => {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    };
+
+    const connectWebSocket = () => {
+      if (cancelled || !WS_URL) return;
+      try {
+        ws = new WebSocket(WS_URL);
+      } catch {
+        // WebSocket unavailable — keep polling as the fallback.
+        return;
+      }
+
+      ws.onopen = () => {
+        if (cancelled) return;
+        wsReconnectAttempts = 0;
+        ws?.send(JSON.stringify({ type: 'subscribe', room: `payment:${params.paymentId}` }));
+      };
+
+      ws.onmessage = (event) => {
+        if (cancelled) return;
+        let payload: any;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (!payload || payload.room !== `payment:${params.paymentId}`) return;
+        const next = payload.data ?? payload.payment;
+        if (!next) return;
+        // A real-time status event arrived — stop polling and trust the socket.
+        wsActive = true;
+        setLiveConnected(true);
+        stopPolling();
+        setPollWarning('');
+        setPayment((prev) => ({ ...(prev ?? {}), ...next } as Payment));
+      };
+
+      ws.onerror = () => {
+        // Fall back to polling if the socket cannot be established.
+        if (!wsActive) scheduleNext();
+      };
+
+      ws.onclose = () => {
+        if (cancelled) return;
+        setLiveConnected(false);
+        if (wsActive) {
+          // Lost a live connection — resume polling until we reconnect.
+          wsActive = false;
+          scheduleNext();
+        }
+        const delay = Math.min(1000 * 2 ** wsReconnectAttempts, WS_RECONNECT_MAX_MS);
+        wsReconnectAttempts += 1;
+        wsReconnectTimeout = setTimeout(connectWebSocket, delay);
+      };
+    };
+
+    connectWebSocket();
     scheduleNext();
 
     return () => {
       cancelled = true;
       pollNowRef.current = null;
       if (timeout) clearTimeout(timeout);
+      if (wsReconnectTimeout) clearTimeout(wsReconnectTimeout);
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        ws.close();
+      }
     };
   }, [params.paymentId]);
 
@@ -190,6 +271,11 @@ export default function PayPage({ params }: { params: { paymentId: string } }) {
                 </div>
               )}
 
+              <div className="flex items-center justify-center gap-2 mb-4 text-sm text-gray-500">
+                <span className={`inline-block w-2 h-2 rounded-full ${liveConnected ? 'bg-green-500 animate-pulse' : 'bg-yellow-500 animate-pulse'}`} />
+                <span>{liveConnected ? 'Live — waiting for payment...' : 'Waiting for payment...'}</span>
+              </div>
+
               <div className="flex justify-center mb-4">
                 {stellarUri ? (
                   <div
@@ -205,43 +291,11 @@ export default function PayPage({ params }: { params: { paymentId: string } }) {
                     className="bg-white p-6 rounded-xl border border-gray-200 flex flex-col items-center justify-center text-center space-y-2 w-44 h-44"
                   >
                     <Loader2 className="w-8 h-8 text-brand-500 animate-spin" />
-                    <p className="text-xs text-gray-500">Calculating crypto exchange rate…</p>
                   </div>
                 )}
               </div>
-              <p className="text-center text-xs text-gray-500 mb-4">
-                Scan with a Stellar wallet app, then approve USDC before deposit
-              </p>
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs mb-4">
-                <p className="font-semibold text-blue-900 mb-1">Required customer flow</p>
-                <p className="text-blue-800">1) approve(escrow_contract, amount)</p>
-                <p className="text-blue-800">2) deposit()</p>
-                <p className="text-blue-700 mt-1">
-                  Your wallet signs both steps. No private keys are shared with DupDub.
-                </p>
-              </div>
-
-              <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs mb-3">
-                <p className="text-xs text-gray-500 mb-1">Deposit address (exact)</p>
-                <div className="flex items-center gap-2">
-                  <code className="text-sm font-mono font-bold break-all flex-1 text-gray-900">{payment.stellarDepositAddress}</code>
-                  <button
-                    onClick={() => copy(payment.stellarDepositAddress ?? '', 'address')}
-                    aria-label="Copy deposit address"
-                    className="shrink-0"
-                  >
-                    {copied === 'address' ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4 text-gray-400" />}
-                  </button>
-                </div>
-              </div>
             </>
-          ) : (
-            <div className="text-center py-6">
-              {STATUS_ICONS[payment.status] ?? DEFAULT_STATUS_ICON}
-              <p className="mt-3 text-sm font-medium text-gray-700 capitalize">{payment.status}</p>
-              {pollWarning && <p className="mt-2 text-xs text-amber-600">{pollWarning}</p>}
-            </div>
-          )}
+          ) : null}
         </div>
       </div>
     </div>
