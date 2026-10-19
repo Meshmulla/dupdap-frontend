@@ -9,6 +9,10 @@
  * non-admin merchants — it should render an explicit loading state instead,
  * and still redirect non-admin merchants to /dashboard.
  *
+ * Issue #490: unauthenticated users must not be able to access /dashboard.
+ * The layout checks Zustand auth state on mount and redirects to
+ * /auth/login when no token exists.
+ *
  * Combinations of token × merchant state:
  *   - token + merchant   → renders dashboard UI
  *   - token only         → renders loading state (no blank flash), no redirect
@@ -179,6 +183,27 @@ describe('DashboardLayout — auth guards and hydration', () => {
         <div data-testid="child-content">Dashboard Content</div>
       </DashboardLayout>,
     );
+
+    await act(async () => {
+      vi.runAllTimers();
+    });
+
+    expect(mockPush).toHaveBeenCalledWith('/auth/login?next=%2Fdashboard');
+  });
+
+  it('[unauthenticated GET /dashboard] redirects to /auth/login', async () => {
+    // Issue #490: an unauthenticated visitor landing on /dashboard must be
+    // sent to /auth/login rather than seeing the merchant interface.
+    stubAuth({ token: null, merchant: null, hasHydrated: true });
+
+    render(
+      <DashboardLayout>
+        <div data-testid="child-content">Dashboard Content</div>
+      </DashboardLayout>,
+    );
+
+    // The merchant interface must not be rendered for unauthenticated users.
+    expect(screen.queryByTestId('child-content')).not.toBeInTheDocument();
 
     await act(async () => {
       vi.runAllTimers();
