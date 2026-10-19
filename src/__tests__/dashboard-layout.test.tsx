@@ -30,10 +30,11 @@ import AdminLayout from '@/app/dashboard/admin/layout';
 
 const mockPush = vi.fn();
 const mockReplace = vi.fn();
+let mockPathname = '/dashboard';
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: mockPush, replace: mockReplace }),
-  usePathname: () => '/dashboard',
+  usePathname: () => mockPathname,
 }));
 
 vi.mock('next/link', () => ({
@@ -85,6 +86,7 @@ function stubAuth(overrides: {
 describe('DashboardLayout — auth guards and hydration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPathname = '/dashboard';
     vi.useFakeTimers();
   });
 
@@ -216,6 +218,9 @@ describe('DashboardLayout — auth guards and hydration', () => {
 describe('AdminLayout — admin authorization guard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The admin layout only ever mounts under the admin route tree, so the
+    // guard must see an admin pathname for its authorization decision.
+    mockPathname = '/dashboard/admin/settlements';
     vi.useFakeTimers();
   });
 
