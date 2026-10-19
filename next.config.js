@@ -1,13 +1,26 @@
 /** @type {import('next').NextConfig} */
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000/api/v1';
 
+// Known Stellar / wallet origins that the app must be able to reach from the
+// browser. Horizon (testnet + mainnet) for balance/tx submission, Soroban RPC
+// for contract calls, and the Freighter / Stellar Wallets Kit endpoints used
+// during wallet connection and signing.
+const STELLAR_ORIGINS = [
+  'https://horizon-testnet.stellar.org',
+  'https://horizon.stellar.org',
+  'https://soroban-testnet.stellar.org',
+  'https://soroban.stellar.org',
+  'https://friendbot.stellar.org',
+  'https://api.freighter.app',
+];
+
 const nextConfig = {
   reactStrictMode: true,
   env: {
     NEXT_PUBLIC_API_URL: apiUrl,
   },
   async headers() {
-    const connectSrc = ["'self'", new URL(apiUrl).origin];
+    const connectSrc = ["'self'", new URL(apiUrl).origin, ...STELLAR_ORIGINS];
 
     return [
       {
